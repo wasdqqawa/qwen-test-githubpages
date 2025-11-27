@@ -2,16 +2,15 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using AOT;
-using System.Runtime.InteropServices;
+using WebSocketSharp;
 
-public class WebRTCNetworkManager : MonoBehaviour
+public class WebSocketNetworkManager : MonoBehaviour
 {
-    public static WebRTCNetworkManager Instance;
+    public static WebSocketNetworkManager Instance;
     
     [Header("Network Settings")]
     public bool isHost = false;
-    public bool isSinglePlayerMode = false;  // 添加单人模式标志
+    public bool isSinglePlayerMode = false;
     public int maxPlayers = 4;
     public float syncRate = 0.1f;
     
@@ -19,40 +18,14 @@ public class WebRTCNetworkManager : MonoBehaviour
     private string localPlayerId;
     private bool isInitialized = false;
     
+    [Header("WebSocket Settings")]
+    public string serverUrl = "ws://localhost:8080"; // 默认WebSocket服务器地址
+    
+    private WebSocket webSocket;
+    private bool isConnecting = false;
+    
     [Header("Debug")]
     public bool debugMode = true;
-    
-#if UNITY_WEBGL && !UNITY_EDITOR
-    [DllImport("__Internal")]
-    private static extern bool WebRTC_Init();
-    
-    [DllImport("__Internal")]
-    private static extern bool WebRTC_JoinRoom(string roomId);
-    
-    [DllImport("__Internal")]
-    private static extern bool WebRTC_CreateRoom(string roomId);
-    
-    [DllImport("__Internal")]
-    private static extern bool WebRTC_SendMessage(string message);
-    
-    [DllImport("__Internal")]
-    private static extern bool WebRTC_IsConnected();
-    
-    [DllImport("__Internal")]
-    private static extern int WebRTC_GetPeerCount();
-    
-    public delegate void NetworkMessageReceivedDelegate(string message);
-    public event NetworkMessageReceivedDelegate OnNetworkMessageReceived;
-
-    [MonoPInvokeCallback(typeof(Action<string>))]
-    public static void OnWebRTCMessage(string message)
-    {
-        if (Instance != null)
-        {
-            Instance.OnMessageReceivedFromWebRTC(message);
-        }
-    }
-#endif
     
     void Awake()
     {
@@ -71,24 +44,10 @@ public class WebRTCNetworkManager : MonoBehaviour
     void InitializeNetwork()
     {
         localPlayerId = GeneratePlayerId();
-        
-#if UNITY_WEBGL && !UNITY_EDITOR
-        if (WebRTC_Init())
-        {
-            isInitialized = true;
-            if (debugMode)
-                Debug.Log("WebRTC Network Manager Initialized. Local ID: " + localPlayerId);
-        }
-        else
-        {
-            Debug.LogError("Failed to initialize WebRTC");
-        }
-#else
-        // 非WebGL平台的模拟实现
         isInitialized = true;
+        
         if (debugMode)
-            Debug.Log("Network Manager Initialized (Simulated). Local ID: " + localPlayerId);
-#endif
+            Debug.Log("WebSocket Network Manager Initialized. Local ID: " + localPlayerId);
     }
     
     string GeneratePlayerId()
@@ -100,34 +59,24 @@ public class WebRTCNetworkManager : MonoBehaviour
     {
         if (!isInitialized) return;
         
-#if UNITY_WEBGL && !UNITY_EDITOR
-        string roomId = "mc_" + System.DateTime.Now.Ticks.ToString();
-        if (WebRTC_CreateRoom(roomId))
-        {
-            isHost = true;
-            connectedPlayers[localPlayerId] = new NetworkPlayer(localPlayerId, true);
-            
-            if (debugMode)
-                Debug.Log("Started as Host. Room ID: " + roomId + ", Player ID: " + localPlayerId);
-        }
-        else
-        {
-            Debug.LogError("Failed to create WebRTC room");
-        }
-#else
+        // 在WebSocket实现中，主机需要启动服务器或连接到中央服务器
+        // 这里我们只是设置为主机模式
         isHost = true;
+        isSinglePlayerMode = false;
         connectedPlayers[localPlayerId] = new NetworkPlayer(localPlayerId, true);
         
+        // 连接到WebSocket服务器作为主机
+        ConnectToServer("host");
+        
         if (debugMode)
-            Debug.Log("Started as Host (Simulated). Player ID: " + localPlayerId);
-#endif
+            Debug.Log("Started as Host. Player ID: " + localPlayerId);
     }
     
     public void StartSinglePlayerMode()
     {
-        // 在单人模式下，我们仍然初始化网络管理器，但不会尝试连接到任何其他玩家
+        // 在单人模式下，我们不连接到任何网络
         isSinglePlayerMode = true;
-        isHost = true; // 在单人模式下，玩家就是主机
+        isHost = true;
         connectedPlayers[localPlayerId] = new NetworkPlayer(localPlayerId, true);
         
         if (debugMode)
@@ -138,31 +87,88 @@ public class WebRTCNetworkManager : MonoBehaviour
     {
         if (!isInitialized) return;
         
-#if UNITY_WEBGL && !UNITY_EDITOR
-        if (WebRTC_JoinRoom(roomId))
-        {
-            isHost = false;
-            connectedPlayers[localPlayerId] = new NetworkPlayer(localPlayerId, false);
-            
-            if (debugMode)
-                Debug.Log("Joined Game. Room ID: " + roomId + ", Player ID: " + localPlayerId);
-        }
-        else
-        {
-            Debug.LogError("Failed to join WebRTC room");
-        }
-#else
+        // 在WebSocket实现中，加入游戏意味着连接到服务器
         isHost = false;
+        isSinglePlayerMode = false;
         connectedPlayers[localPlayerId] = new NetworkPlayer(localPlayerId, false);
         
+        // 连接到WebSocket服务器作为客户端
+        ConnectToServer("join", roomId);
+        
         if (debugMode)
-            Debug.Log("Joined Game (Simulated). Player ID: " + localPlayerId);
-#endif
+            Debug.Log("Joined Game. Room ID: " + roomId + ", Player ID: " + localPlayerId);
     }
+    
+    private void ConnectToServer(string mode, string roomId = "")
+    {
+        if (isConnecting) return;
+        
+        isConnecting = true;
+        
+        try
+        {
+            // 创建WebSocket连接
+            string url = serverUrl;
+            if (!string.IsNullOrEmpty(roomId))
+            {
+                url += "?roomId=" + roomId + "&playerId=" + localPlayerId + "&mode=" + mode;
+            }
+            else
+            {
+                url += "?playerId=" + localPlayerId + "&mode=" + mode;
+            }
+            
+            webSocket = new WebSocket(url);
+            
+            webSocket.OnOpen += (sender, e) => {
+                if (debugMode)
+                    Debug.Log("WebSocket connected successfully");
+                isConnecting = false;
+            };
+            
+            webSocket.OnMessage += (sender, e) => {
+                OnMessageReceivedFromWebSocket(e.Data);
+                
+                // 触发消息接收事件，供其他脚本使用
+                OnNetworkMessageReceived?.Invoke(e.Data);
+            };
+            
+            webSocket.OnError += (sender, e) => {
+                Debug.LogError("WebSocket error: " + e.Message);
+                isConnecting = false;
+                
+                // 连接失败时，切换到单人模式
+                StartSinglePlayerMode();
+            };
+            
+            webSocket.OnClose += (sender, e) => {
+                Debug.Log("WebSocket connection closed: " + e.Reason);
+                isConnecting = false;
+                
+                // 连接断开时，切换到单人模式
+                StartSinglePlayerMode();
+            };
+            
+            webSocket.ConnectAsync();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("Error connecting to WebSocket server: " + e.Message);
+            isConnecting = false;
+            
+            // 连接失败时，切换到单人模式
+            StartSinglePlayerMode();
+        }
+    }
+    
+    public delegate void NetworkMessageReceivedDelegate(string message);
+    public event NetworkMessageReceivedDelegate OnNetworkMessageReceived;
     
     public void SendBlockUpdate(int x, int y, int z, BlockType blockType, bool isPlacing)
     {
         if (!isInitialized) return;
+        
+        if (isSinglePlayerMode) return; // 在单人模式下不发送网络消息
         
         var blockUpdate = new BlockUpdateMessage
         {
@@ -173,18 +179,14 @@ public class WebRTCNetworkManager : MonoBehaviour
         };
         
         string jsonMessage = JsonUtility.ToJson(blockUpdate);
-        
-#if UNITY_WEBGL && !UNITY_EDITOR
-        WebRTC_SendMessage(jsonMessage);
-#else
-        // 非WebGL平台的模拟实现
-        BroadcastMessage(blockUpdate);
-#endif
+        SendMessageToServer(jsonMessage);
     }
     
     public void SendPlayerPosition(Vector3 position, Vector3 rotation)
     {
         if (!isInitialized) return;
+        
+        if (isSinglePlayerMode) return; // 在单人模式下不发送网络消息
         
         var playerUpdate = new PlayerPositionMessage
         {
@@ -194,39 +196,22 @@ public class WebRTCNetworkManager : MonoBehaviour
         };
         
         string jsonMessage = JsonUtility.ToJson(playerUpdate);
-        
-        // 只有主机才广播位置更新，以减少网络流量
-        if (isHost)
-        {
-#if UNITY_WEBGL && !UNITY_EDITOR
-            WebRTC_SendMessage(jsonMessage);
-#else
-            // 非WebGL平台的模拟实现
-            BroadcastMessage(playerUpdate);
-#endif
-        }
+        SendMessageToServer(jsonMessage);
     }
     
-    void BroadcastMessage(object message)
+    private void SendMessageToServer(string message)
     {
-        // 在实际WebRTC实现中，这里会通过数据通道发送消息
-        // 模拟网络广播
-        OnMessageReceived(message);
-    }
-    
-    public void OnMessageReceived(object message)
-    {
-        if (message is BlockUpdateMessage blockMsg)
+        if (webSocket != null && webSocket.ReadyState == WebSocketState.Open)
         {
-            HandleBlockUpdate(blockMsg);
+            webSocket.Send(message);
         }
-        else if (message is PlayerPositionMessage playerMsg)
+        else
         {
-            HandlePlayerPosition(playerMsg);
+            Debug.LogWarning("WebSocket not connected, cannot send message: " + message);
         }
     }
     
-    public void OnMessageReceivedFromWebRTC(string jsonMessage)
+    public void OnMessageReceivedFromWebSocket(string jsonMessage)
     {
         try
         {
@@ -242,14 +227,17 @@ public class WebRTCNetworkManager : MonoBehaviour
                 PlayerPositionMessage playerMsg = JsonUtility.FromJson<PlayerPositionMessage>(jsonMessage);
                 HandlePlayerPosition(playerMsg);
             }
-            
-            // 触发消息接收事件，供其他脚本使用
-            OnNetworkMessageReceived?.Invoke(jsonMessage);
         }
         catch (System.Exception e)
         {
-            Debug.LogError("Error parsing WebRTC message: " + e.Message + " | Message: " + jsonMessage);
+            Debug.LogError("Error parsing WebSocket message: " + e.Message + " | Message: " + jsonMessage);
         }
+    }
+    
+    // JavaScript接口函数
+    public void OnWebSocketMessage(string message)
+    {
+        OnMessageReceivedFromWebSocket(message);
     }
     
     void HandleBlockUpdate(BlockUpdateMessage msg)
@@ -281,11 +269,9 @@ public class WebRTCNetworkManager : MonoBehaviour
     
     public bool IsConnected()
     {
-#if UNITY_WEBGL && !UNITY_EDITOR
-        return isInitialized && (isSinglePlayerMode || WebRTC_IsConnected());
-#else
-        return isInitialized && (isSinglePlayerMode || connectedPlayers.Count > 0);
-#endif
+        return isInitialized && 
+               (isSinglePlayerMode || 
+                (webSocket != null && webSocket.ReadyState == WebSocketState.Open));
     }
     
     public int GetPlayerCount()
@@ -295,11 +281,8 @@ public class WebRTCNetworkManager : MonoBehaviour
             return 1; // 在单人模式下，只计算本地玩家
         }
         
-#if UNITY_WEBGL && !UNITY_EDITOR
-        return isInitialized ? WebRTC_GetPeerCount() + 1 : connectedPlayers.Count; // +1 for local player
-#else
+        // 在实际实现中，这应该从服务器获取
         return connectedPlayers.Count;
-#endif
     }
     
     public string GetLocalPlayerId()
@@ -310,6 +293,14 @@ public class WebRTCNetworkManager : MonoBehaviour
     public bool IsLocalPlayerHost()
     {
         return isHost;
+    }
+    
+    void OnDestroy()
+    {
+        if (webSocket != null)
+        {
+            webSocket.Close();
+        }
     }
 }
 
