@@ -9,7 +9,7 @@ export default defineConfig({
     outDir: 'dist',
     assetsDir: 'assets',
     sourcemap: false,
-    minify: 'terser',
+    minify: false, // 临时禁用压缩以避免资源问题
     terserOptions: {
       compress: {
         drop_console: true, // 移除console
